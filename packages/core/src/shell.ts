@@ -407,6 +407,8 @@ const layer = () =>
                   // Report the terminal status only once captured output is complete, so a reader that
                   // sees it never reads a partial file.
                   yield* outputDone.await
+                  // A removed command already failed its waiters and published its deletion.
+                  if (commands.get(id) !== command) return
                   command.info = produce(command.info, (draft) => {
                     draft.status = outcome.status
                     if (outcome.exit !== undefined) draft.exit = outcome.exit
