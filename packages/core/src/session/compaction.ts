@@ -294,14 +294,14 @@ export const layer = Layer.effect(
             context.model.limit,
           )
           const reply = yield* stream(context, prompted, prepared.options)
-          if (filled(reply.text)) return { ...reply, recent }
+          if (filled(reply.text)) return { ...reply, recent: recent.text }
 
           const nudged = fitOutput(
             LLMRequest.update(prompted, { messages: [...prompted.messages, Message.user(NUDGE)] }),
             context.model.limit,
           )
           const retry = yield* stream(context, nudged, prepared.options)
-          if (filled(retry.text)) return { ...retry, recent }
+          if (filled(retry.text)) return { ...retry, recent: recent.text }
           return yield* Effect.fail<Failure>({
             error: {
               type: "compaction.failed",
@@ -313,11 +313,15 @@ export const layer = Layer.effect(
         })
 
       const overhead = Token.estimate(prompt) + Token.estimate(NUDGE)
-      // Automatic compaction starts past the ceiling, so aiming the whole conversation at it would always flatten the
-      // request and lose its cached prefix. Send it unchanged while the window can still fit the summary; only an
-      // overflow retry aims below the rejected size.
-      const target = trigger.reason === "overflow" ? budget : Math.max(budget, summaryRoom(context.model.limit))
-      return yield* deliver(trigger, prepared, recent, target - overhead, send)
+      // Automatic compaction starts past the ceiling, so the whole conversation is sent unchanged while the window can
+      // still fit the summary. A request that has to be shrunk has lost its cached prefix anyway, so it shrinks only
+      // the history before the tail: dropping exchanges to make room for the tail would leave them in neither the
+      // summary nor the tail.
+      const fit = trigger.reason === "overflow" ? budget : Math.max(budget, summaryRoom(context.model.limit))
+      return yield* deliver(trigger, prepared, recent.text, budget - overhead, send, {
+        fit: fit - overhead,
+        history: withoutTail(prepared.request, recent.from),
+      })
     })
 
     /**
@@ -383,7 +387,8 @@ export const layer = Layer.effect(
     })
 
     /**
-     * Sends the request as-is if it is estimated to fit `target`, and as text otherwise (see `flattenAndDropOldest`).
+     * Sends the request as-is if it is estimated to fit `shrink.fit`, and otherwise `shrink.history` as text aimed at
+     * `target` (see `flattenAndDropOldest`).
      * Limits and estimates can be wrong, so until the provider rejects something as too long, a request that cannot
      * be made to fit is sent whole: unchanged, or as text once its media has to go. A "too long" rejection means the
      * estimate ran low, so the next attempts aim at 70%, 50%, then 35% of the first rejected request's estimate, and a
@@ -398,6 +403,7 @@ export const layer = Layer.effect(
       recent: string,
       target: number,
       send: (request: LLMRequest) => Effect.Effect<Result, AIError | Failure>,
+      shrink: { readonly fit: number; readonly history: LLMRequest } = { fit: target, history: prepared.request },
     ): Effect.fn.Return<Result, Failure> {
       const context = trigger.context
       // The runner opened the manual compaction's message when it delivered the `/compact` item.
@@ -410,16 +416,17 @@ export const layer = Layer.effect(
       let rejections = 0
       let rejected: number | undefined
       let asText = false
+      let fit = shrink.fit
 
       while (true) {
-        const fits = !asText && estimateRequest(prepared.request) <= target
+        const fits = !asText && estimateRequest(prepared.request) <= fit
         const request = fits
           ? prepared.request
-          : (flattenAndDropOldest(prepared.request, context, target) ??
+          : (flattenAndDropOldest(shrink.history, context, target) ??
             (rejections > 0
               ? undefined
               : asText
-                ? flattenAndDropOldest(prepared.request, context, Number.POSITIVE_INFINITY)
+                ? flattenAndDropOldest(shrink.history, context, Number.POSITIVE_INFINITY)
                 : prepared.request))
         if (!request) {
           return yield* Effect.fail<Failure>({
@@ -448,6 +455,7 @@ export const layer = Layer.effect(
           if (step === undefined) return yield* Effect.fail<Failure>({ error })
           rejected ??= estimateRequest(request)
           target = Math.floor(rejected * step)
+          fit = target
           rejections++
           continue
         }
@@ -707,8 +715,8 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
   })
 
 /**
- * The newest messages within `keep` tokens, kept verbatim as text beside the summary independently of what
- * gets summarized. Undefined when there is nothing to compact.
+ * `text`, the newest messages within `keep` tokens, is kept verbatim beside the summary; `from` is the first of
+ * them. Undefined when there is nothing to compact.
  */
 const recentConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
   const entries = messages.flatMap((message) => {
@@ -717,10 +725,15 @@ const recentConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: 
   })
   if (entries.length === 0) return undefined
 
-  return entries
-    .slice(recentStart(entries, keep, previousCompaction(messages)))
-    .map((entry) => entry.text)
-    .join("\n\n")
+  const recent = entries.slice(recentStart(entries, keep, previousCompaction(messages)))
+  return { text: recent.map((entry) => entry.text).join("\n\n"), from: recent[0]?.message.id }
+}
+
+/** The request without the retained tail, which starts at the message with ID `from`. */
+const withoutTail = (request: LLMRequest, from: SessionMessage.ID | undefined) => {
+  const index = from === undefined ? -1 : request.messages.findIndex((message) => message.id === from)
+  if (index < 0) return request
+  return LLMRequest.update(request, { messages: request.messages.slice(0, index) })
 }
 
 const recentStart = (

@@ -3008,8 +3008,9 @@ describe("SessionRunnerLLM", () => {
     expect(userTexts(s.requests[0])[0]).toContain("older exchanges omitted")
     expect(userTexts(s.requests[0])[0]).not.toContain("Request 0:")
     expect(userTexts(s.requests[0])[0]).not.toContain("Request 1:")
-    expect(userTexts(s.requests[0])[0]).not.toContain("Request 2:")
-    expect(userTexts(s.requests[0])[0]).toContain("Request 3:")
+    // The latest exchange is the retained tail, so shrinking drops only exchanges before it.
+    expect(userTexts(s.requests[0])[0]).toContain("Request 2:")
+    expect(userTexts(s.requests[0])[0]).not.toContain("Request 3:")
     expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
       status: "completed",
       summary: "## Objective\n- Recovered",
