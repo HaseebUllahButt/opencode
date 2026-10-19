@@ -130,7 +130,7 @@ const withRecentText = Effect.fnUntraced(function* (
   sessionID: SessionSchema.ID,
   entries: ReadonlyArray<{ readonly seq: number; readonly message: SessionMessage.Info }>,
 ) {
-  const [first, ...rest] = entries
+  const first = entries[0]
   const compaction = first?.message
   if (compaction?.type !== "compaction" || compaction.status !== "completed") return entries
   const firstKept = compaction.metadata?.firstKeptMessageID
@@ -159,7 +159,7 @@ const withRecentText = Effect.fnUntraced(function* (
     .pipe(Effect.orDie)
   const kept = yield* Effect.forEach(rows, decodeMessageRow)
   const recent = kept.map(SessionRecentText.messageToText).filter(Boolean).join("\n\n")
-  return [{ ...first, message: { ...compaction, recent } }, ...rest]
+  return [{ ...first, message: { ...compaction, recent } }, ...entries.slice(1)]
 })
 
 export const load = Effect.fn("SessionHistory.load")(function* (

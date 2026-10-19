@@ -189,6 +189,7 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
   if (event.data.instructionEntries)
     yield* InstructionEntry.initialize(db, event.data.sessionID, event.data.instructionEntries, event.created)
 
+  const forkedID = (seq: number) => SessionMessage.ID.make(`${SessionMessage.ID.fromEvent(event.id)}_${seq}`)
   let cursor = -1
   while (copiedSeq !== undefined) {
     const rows = yield* db
@@ -211,7 +212,6 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
       .pipe(Effect.orDie)
     if (rows.length === 0) break
 
-    const forkedID = (seq: number) => SessionMessage.ID.make(`${SessionMessage.ID.fromEvent(event.id)}_${seq}`)
     const values = yield* Effect.forEach(rows, (row) =>
       Effect.gen(function* () {
         const copy = {
