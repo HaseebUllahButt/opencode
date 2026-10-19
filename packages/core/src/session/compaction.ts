@@ -252,11 +252,12 @@ export const layer = Layer.effect(
 
     /**
      *   first:  [E1 … E8][E9 E10]                  →  [S1 + "E9 E10"]
-     *   again:  [S1 + "E9 E10"][E11 … E18][E19]    →  [S2 + "E19"]      S2 covers S1, E9 E10, and E11–E18
+     *   again:  [S1 + "E9 E10"][E11 … E18][E19]    →  [S2 + "E19"]      S2 covers the whole current conversation
      *
-     * The model is sent the older part, then the summary prompt:
+     * The model is sent the whole conversation, including the tail kept beside the summary, then the summary prompt.
+     * Keeping the normal request's prefix intact lets the summary reuse its prompt cache:
      *
-     *   [system][S1 + "E9 E10"][E11 … E18][prompt]    plus one nudge if the reply skips the template
+     *   [system][S1 + "E9 E10"][E11 … E18][E19][prompt]    plus one nudge if the reply skips the template
      *
      * Later requests open with the checkpoint as one user message:
      *
@@ -275,14 +276,14 @@ export const layer = Layer.effect(
       keep: number,
     ): Effect.fn.Return<Result, Failure> {
       const context = trigger.context
-      const split = splitConversation(context.messages, keep)
-      if (!split) return yield* Effect.fail(NOTHING_TO_COMPACT)
+      const recent = recentConversation(context.messages, keep)
+      if (recent === undefined) return yield* Effect.fail(NOTHING_TO_COMPACT)
 
       const previous = previousCompaction(context.messages)
       const prompt = buildPrompt(previous !== undefined, previous?.summary.includes(LEGACY_HEADING) ?? false)
       const headings = SUMMARY_TEMPLATE.split("\n").filter((line) => line.startsWith("##"))
       const filled = (text: string) => text.split("\n").some((line) => headings.includes(line.trim()))
-      const prepared = yield* prepare(context, split.older, budget)
+      const prepared = yield* prepare(context, context.messages, budget)
 
       // Hooks saw the request without the summary prompt, so it is appended here. A reply that ignores the
       // template gets one reminder before it counts as a failure.
@@ -293,14 +294,14 @@ export const layer = Layer.effect(
             context.model.limit,
           )
           const reply = yield* stream(context, prompted, prepared.options)
-          if (filled(reply.text)) return { ...reply, recent: split.recent }
+          if (filled(reply.text)) return { ...reply, recent }
 
           const nudged = fitOutput(
             LLMRequest.update(prompted, { messages: [...prompted.messages, Message.user(NUDGE)] }),
             context.model.limit,
           )
           const retry = yield* stream(context, nudged, prepared.options)
-          if (filled(retry.text)) return { ...retry, recent: split.recent }
+          if (filled(retry.text)) return { ...retry, recent }
           return yield* Effect.fail<Failure>({
             error: {
               type: "compaction.failed",
@@ -312,7 +313,11 @@ export const layer = Layer.effect(
         })
 
       const overhead = Token.estimate(prompt) + Token.estimate(NUDGE)
-      return yield* deliver(trigger, prepared, split.recent, budget - overhead, send)
+      // Automatic compaction starts past the ceiling, so aiming the whole conversation at it would always flatten the
+      // request and lose its cached prefix. Send it unchanged while the window can still fit the summary; only an
+      // overflow retry aims below the rejected size.
+      const target = trigger.reason === "overflow" ? budget : Math.max(budget, summaryRoom(context.model.limit))
+      return yield* deliver(trigger, prepared, recent, target - overhead, send)
     })
 
     /**
@@ -702,21 +707,20 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
   })
 
 /**
- * `older` gets summarized; `recent`, the newest messages within `keep` tokens, is kept verbatim as text beside
- * the summary. Undefined when there is nothing to compact.
+ * The newest messages within `keep` tokens, kept verbatim as text beside the summary independently of what
+ * gets summarized. Undefined when there is nothing to compact.
  */
-const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
-  const entries = messages.flatMap((message, index) => {
+const recentConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
+  const entries = messages.flatMap((message) => {
     const text = messageToText(message)
-    return text ? [{ message, text, index }] : []
+    return text ? [{ message, text }] : []
   })
   if (entries.length === 0) return undefined
 
-  const recent = entries.slice(recentStart(entries, keep, previousCompaction(messages)))
-  return {
-    older: messages.slice(0, recent[0]?.index ?? messages.length),
-    recent: recent.map((entry) => entry.text).join("\n\n"),
-  }
+  return entries
+    .slice(recentStart(entries, keep, previousCompaction(messages)))
+    .map((entry) => entry.text)
+    .join("\n\n")
 }
 
 const recentStart = (
@@ -734,12 +738,12 @@ const recentStart = (
   const userBoundary = entries.findLastIndex((entry, index) => index <= dropped && entry.message.type === "user")
   if (userBoundary > 0) return userBoundary
 
-  // Everything fits. Keep only the latest exchange so there is an older part left to summarize.
+  // Everything fits. Keep only the latest exchange rather than duplicating the whole conversation beside the summary.
   const latestUser = entries.findLastIndex((entry) => entry.message.type === "user")
   if (latestUser > 0) return latestUser
 
-  // One exchange, nothing older. Summarize it all and keep nothing, unless a previous summary already
-  // kept recent text, in which case keep everything and summarize only the summary before it.
+  // One exchange, nothing older. Keep nothing, unless a previous checkpoint kept recent text: the new summary replaces
+  // that text, so this exchange stays verbatim in its place.
   return previous?.recent ? 0 : entries.length
 }
 
@@ -905,8 +909,8 @@ export const estimatePrompt = (context: SessionContext.Loaded) => {
 
 /**
  * The largest request the model takes while leaving room for its reply: 10% of the window, or `RESERVE_MIN` when that
- * is more. The summary request is capped at the same size, so its output limit is whatever the reserve leaves. A window
- * too small to give up `RESERVE_MIN` keeps 10%.
+ * is more. A summary request that must be shrunk is aimed at the same size. A window too small to give up
+ * `RESERVE_MIN` keeps 10%.
  */
 const calculateCeiling = (limit: SessionContext.Loaded["model"]["limit"], buffer: number | undefined) => {
   // Unknown limits are reported as 0. An unknown input limit falls back to the context window; with no window at
@@ -916,6 +920,10 @@ const calculateCeiling = (limit: SessionContext.Loaded["model"]["limit"], buffer
   if (buffer !== undefined) return window - buffer
   return window - Math.max(Math.floor(window * 0.1), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0)
 }
+
+/** The largest summary request that leaves `RESERVE_MIN` of the window for the summary. Zero for an unknown window. */
+const summaryRoom = (limit: SessionContext.Loaded["model"]["limit"]) =>
+  Math.max(0, (limit.input || limit.context) - RESERVE_MIN)
 
 /**
  * Another provider's count may describe a native window this model cannot replay. History then holds the original

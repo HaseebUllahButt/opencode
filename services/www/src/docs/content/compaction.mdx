@@ -7,18 +7,20 @@ summary, so the session can keep going past the model's context limit.
 
 ## How it works
 
-When a session approaches the model's context limit, OpenCode summarizes
-everything except the most recent conversation, about 15,000 tokens by default.
-Once the summary is ready, it is placed in front of that recent conversation and
-the session continues from there.
+When a session approaches the model's context limit, OpenCode summarizes the
+entire current conversation. It also keeps the most recent conversation, about
+15,000 tokens by default, beside the summary so exact recent details remain
+available.
 
 ```text
 before   [ system prompt ][ older conversation ............ ][ recent 15k ][ pending work ]
-after    [ system prompt ][ summary ][ recent 15k ][ pending work ]
+request  [ system prompt ][ older conversation ............ ][ recent 15k ][ summary instructions ]
+after    [ system prompt ][ summary of older + recent ][ recent 15k ][ pending work ]
 ```
 
-The model sees the summary as past conversation. Later compactions update the
-same summary rather than starting over.
+Sending the full conversation lets the summary request reuse the normal request's
+prompt cache when the provider supports it. Later compactions update the existing
+summary using the conversation since that checkpoint.
 
 ## Start
 

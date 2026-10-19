@@ -498,6 +498,139 @@ it.effect("manual compaction summarizes short context instead of no-op", () =>
   }),
 )
 
+it.effect("summary compaction extends the primary request prefix while retaining the latest exchange", () =>
+  Effect.gen(function* () {
+    requests = []
+    const session = yield* insertSession(Session.ID.make("ses_compaction_full_history"))
+    const messages = [
+      SessionMessage.User.make({
+        id: SessionMessage.ID.create(),
+        type: "user",
+        text: "Earlier request",
+        time: { created: DateTime.makeUnsafe(0) },
+      }),
+      SessionMessage.Assistant.make({
+        id: SessionMessage.ID.create(),
+        type: "assistant",
+        agent: Agent.defaultID,
+        model: resolved.ref,
+        content: [{ type: "text", text: "Earlier answer" }],
+        time: { created: DateTime.makeUnsafe(1) },
+      }),
+      SessionMessage.User.make({
+        id: SessionMessage.ID.create(),
+        type: "user",
+        text: "Latest exact request",
+        time: { created: DateTime.makeUnsafe(2) },
+      }),
+      SessionMessage.Assistant.make({
+        id: SessionMessage.ID.create(),
+        type: "assistant",
+        agent: Agent.defaultID,
+        model: resolved.ref,
+        content: [{ type: "text", text: "Latest exact answer" }],
+        time: { created: DateTime.makeUnsafe(3) },
+      }),
+    ]
+    const context = loaded(session, messages)
+    const builder = yield* SessionModelRequest.Service
+    const base = SessionModelRequest.baseTranscript({
+      ...context,
+      agent: context.agent.info,
+      messages: messages.slice(0, -1),
+    })
+    const primary = yield* builder.primary({
+      ...base,
+      session,
+      agent: context.agent.id,
+      model: context.model,
+      tools: context.tools,
+    })
+
+    expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
+    expect(requests).toHaveLength(1)
+    expect(requests[0].system).toEqual(primary.request.system)
+    expect(requests[0].tools).toEqual(primary.request.tools)
+    expect(requests[0].promptCacheKey).toBe(primary.request.promptCacheKey)
+    expect(requests[0].messages.slice(0, primary.request.messages.length)).toEqual([...primary.request.messages])
+    expect(requests[0].messages.at(-2)?.content).toEqual([{ type: "text", text: "Latest exact answer" }])
+    expect(requests[0].messages.at(-1)?.content).toEqual([{ type: "text", text: SessionCompaction.buildPrompt(false) }])
+
+    const store = yield* SessionStore.Service
+    expect(yield* store.context(session.id)).toMatchObject([
+      {
+        type: "compaction",
+        status: "completed",
+        summary: "## Objective\n- manual summary",
+        recent: "[User]: Latest exact request\n\n[Assistant]: Latest exact answer",
+      },
+    ])
+  }),
+)
+
+it.effect("summary updates include the retained tail in compaction hooks and the model request", () =>
+  Effect.gen(function* () {
+    requests = []
+    const session = yield* insertSession(Session.ID.make("ses_compaction_full_update"))
+    const messages = [
+      SessionMessage.CompactionCompleted.make({
+        id: SessionMessage.ID.create(),
+        type: "compaction",
+        status: "completed",
+        reason: "auto",
+        summary: "## Objective\n- Previous objective",
+        recent: "[User]: Previous exact request",
+        time: { created: DateTime.makeUnsafe(0) },
+      }),
+      SessionMessage.User.make({
+        id: SessionMessage.ID.create(),
+        type: "user",
+        text: "The latest request supersedes the previous objective.",
+        time: { created: DateTime.makeUnsafe(1) },
+      }),
+    ]
+    const context = loaded(session, messages)
+    const expected = SessionModelRequest.baseTranscript({ ...context, agent: context.agent.info }).messages
+    const hooks = yield* PluginHooks.Service
+    yield* hooks.register("session", "compaction", (event) =>
+      Effect.sync(() => {
+        expect(event.messages).toEqual(expected)
+      }),
+    )
+
+    expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
+    expect(requests).toHaveLength(1)
+    expect(requests[0].messages.slice(0, -1)).toEqual(expected)
+    expect(requests[0].messages.at(-1)?.content).toEqual([{ type: "text", text: SessionCompaction.buildPrompt(true) }])
+    const store = yield* SessionStore.Service
+    expect(yield* store.context(session.id)).toMatchObject([
+      { type: "compaction", recent: "[User]: The latest request supersedes the previous objective." },
+    ])
+  }),
+)
+
+it.effect("summary compaction past the ceiling keeps the conversation unchanged while the window fits", () =>
+  Effect.gen(function* () {
+    requests = []
+    const session = yield* insertSession(Session.ID.make("ses_compaction_near_window"))
+    // About 182k estimated tokens: past the 180k ceiling, within the 184k left after reserving room for the summary.
+    const messages = ["first", "second"].map((label) =>
+      SessionMessage.User.make({
+        id: SessionMessage.ID.create(),
+        type: "user",
+        text: `${label} ${"x".repeat(364_000)}`,
+        time: { created: DateTime.makeUnsafe(0) },
+      }),
+    )
+
+    expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
+    expect(requests).toHaveLength(1)
+    expect(requests[0].messages).toHaveLength(3)
+    expect(requests[0].messages[0].content).toEqual([{ type: "text", text: messages[0].text }])
+    expect(requests[0].generation?.maxTokens).toBeLessThan(20_000)
+  }),
+)
+
 it.effect("compaction lowers the output limit when it sends a request it could not shrink", () =>
   Effect.gen(function* () {
     requests = []

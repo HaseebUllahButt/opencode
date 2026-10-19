@@ -2557,7 +2557,7 @@ describe("SessionRunnerLLM", () => {
           role: "user",
           content: [{ type: "text", text: SessionCompaction.buildPrompt(false) }],
         })
-        expect(userTexts(compact)).not.toContain("Retained recent request")
+        expect(userTexts(compact).includes("Retained recent request")).toBe(reason === "auto")
         for (const field of [
           "model",
           "system",
@@ -3008,7 +3008,8 @@ describe("SessionRunnerLLM", () => {
     expect(userTexts(s.requests[0])[0]).toContain("older exchanges omitted")
     expect(userTexts(s.requests[0])[0]).not.toContain("Request 0:")
     expect(userTexts(s.requests[0])[0]).not.toContain("Request 1:")
-    expect(userTexts(s.requests[0])[0]).toContain("Request 2:")
+    expect(userTexts(s.requests[0])[0]).not.toContain("Request 2:")
+    expect(userTexts(s.requests[0])[0]).toContain("Request 3:")
     expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
       status: "completed",
       summary: "## Objective\n- Recovered",
@@ -3102,6 +3103,7 @@ describe("SessionRunnerLLM", () => {
     yield* s.runPrompt("Recent exact request ".repeat(180))
 
     expect(s.requests).toHaveLength(2)
+    expect(JSON.stringify(s.requests[0].messages)).toContain("Recent exact request ".repeat(180))
     expect(userTexts(s.requests[0]).at(-1)).toContain("## Objective")
     expect(userTexts(s.requests[1])).toHaveLength(1)
     expect(userTexts(s.requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
@@ -3126,6 +3128,7 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(2)
     expect(userTexts(s.requests[0])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
     expect(userTexts(s.requests[0])[0]).toContain("Recent exact request")
+    expect(JSON.stringify(s.requests[0].messages)).toContain("Newest exact request ".repeat(180))
     expect(userTexts(s.requests[0]).at(-1)).toBe(SessionCompaction.buildPrompt(true))
     expect((yield* store.context(sessionID))[0]).toMatchObject({
       type: "compaction",
