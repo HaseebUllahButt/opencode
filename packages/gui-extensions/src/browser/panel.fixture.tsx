@@ -731,6 +731,7 @@ export function mountBrowserRegion(input: RegionHost) {
       },
       close: (key, session) => close(session.key, key),
       toggle() {},
+      hide() {},
       state(key, session) {
         if (strip(session.key).active === key) return "visible"
 
