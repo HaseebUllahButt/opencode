@@ -281,7 +281,10 @@ export function createActiveSessionRegion(input: {
         prompt.context.add(item)
 
         if (comment) return prompt.capture().quoteComment.set(contextItemKey(item))
-        focus()
+
+        if (!promptRef) return
+        promptRef.focus()
+        setCursorPosition(promptRef, prompt.cursor() ?? promptLength(prompt.current()))
       },
     },
     actions: {

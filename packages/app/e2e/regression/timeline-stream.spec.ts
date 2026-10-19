@@ -2004,11 +2004,17 @@ test("opens a quote's comment with Alt-click", async ({ page }) => {
     await expect(toolbar).toBeVisible()
   }
 
-  // A plain click adds the quote and leaves the comment closed.
+  // A plain click adds the quote, leaves the comment closed, and returns the caret to where the draft left it.
+  const editor = page.locator('[data-component="composer-editor"]')
+  await editor.click()
+  await page.keyboard.type("Draft")
   await select("The first sentence to quote.")
   await toolbar.getByRole("button", { name: "Quote", exact: true }).click()
   await expect(chips).toHaveCount(1)
   await expect(comment).toHaveCount(0)
+  await expect(editor).toBeFocused()
+  await page.keyboard.type(" follow-up")
+  await expect(editor).toHaveText("Draft follow-up")
   await chips.nth(0).hover()
   await page.getByRole("button", { name: "Remove attachment" }).click()
   await expect(chips).toHaveCount(0)
