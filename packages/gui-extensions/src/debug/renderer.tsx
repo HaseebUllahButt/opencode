@@ -19,6 +19,7 @@ const setup: Setup<typeof Debug> = (ctx) => {
     setMotion((value) => !value)
   }
 
+  // Beta reaches the Motion workspace on purpose, from its command or the debug bar; only local builds float its button.
   const developer = channel !== "prod"
 
   ctx.add(
@@ -57,7 +58,12 @@ const setup: Setup<typeof Debug> = (ctx) => {
         </Show>
         <Show when={developer}>
           <Suspense>
-            <Motion open={motion()} button={!visible()} toggle={toggleMotion} title={ctx.t("motion.title")} />
+            <Motion
+              open={motion()}
+              button={import.meta.env.DEV && !visible()}
+              toggle={toggleMotion}
+              title={ctx.t("motion.title")}
+            />
           </Suspense>
         </Show>
       </>
