@@ -211,21 +211,40 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
       .pipe(Effect.orDie)
     if (rows.length === 0) break
 
-    yield* db
-      .insert(SessionMessageTable)
-      .values(
-        rows.map((row) => ({
-          id: SessionMessage.ID.make(`${SessionMessage.ID.fromEvent(event.id)}_${row.seq}`),
+    const forkedID = (seq: number) => SessionMessage.ID.make(`${SessionMessage.ID.fromEvent(event.id)}_${seq}`)
+    const values = yield* Effect.forEach(rows, (row) =>
+      Effect.gen(function* () {
+        const copy = {
+          id: forkedID(row.seq),
           session_id: event.data.sessionID,
           type: row.type,
           seq: row.seq,
           time_created: row.time_created,
           time_updated: row.time_updated,
           data: row.data,
-        })),
-      )
-      .run()
-      .pipe(Effect.orDie)
+        }
+        // A summary references the first message it kept, which the fork copied under a new ID.
+        const firstKept = row.type === "compaction" ? row.data.metadata?.firstKeptMessageID : undefined
+        if (typeof firstKept !== "string") return copy
+        const kept = yield* db
+          .select({ seq: SessionMessageTable.seq })
+          .from(SessionMessageTable)
+          .where(
+            and(
+              eq(SessionMessageTable.session_id, event.data.parentID),
+              eq(SessionMessageTable.id, SessionMessage.ID.make(firstKept)),
+            ),
+          )
+          .get()
+          .pipe(Effect.orDie)
+        if (!kept) return copy
+        return {
+          ...copy,
+          data: { ...row.data, metadata: { ...row.data.metadata, firstKeptMessageID: forkedID(kept.seq) } },
+        }
+      }),
+    )
+    yield* db.insert(SessionMessageTable).values(values).run().pipe(Effect.orDie)
 
     cursor = rows.at(-1)!.seq
   }
